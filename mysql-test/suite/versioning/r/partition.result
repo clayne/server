@@ -580,6 +580,305 @@ x	a
 #
 create or replace table t1 (f int) with system versioning partition by hash(f);
 insert delayed into t1 values (1);
+#
+# MDEV-19903 Setup default partitions for system versioning
+#
+create or replace table t1 (x int) with system versioning partition by system_time;
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `x` int(11) DEFAULT NULL
+) ENGINE=DEFAULT_ENGINE DEFAULT CHARSET=latin1 WITH SYSTEM VERSIONING
+ PARTITION BY SYSTEM_TIME 
+PARTITIONS 2
+# 2 partitions are created: p0 and pn
+select PARTITION_NAME, PARTITION_METHOD, PARTITION_DESCRIPTION from information_schema.partitions where table_name = 't1' order by PARTITION_NAME;
+PARTITION_NAME	PARTITION_METHOD	PARTITION_DESCRIPTION
+p0	SYSTEM_TIME	NULL
+pn	SYSTEM_TIME	CURRENT
+create or replace table t1 (x int) with system versioning partition by system_time partitions 4;
+Warnings:
+Warning	4115	Maybe missing parameters: no rotation condition for multiple HISTORY partitions.
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `x` int(11) DEFAULT NULL
+) ENGINE=DEFAULT_ENGINE DEFAULT CHARSET=latin1 WITH SYSTEM VERSIONING
+ PARTITION BY SYSTEM_TIME 
+PARTITIONS 4
+# 4 partitions are created: p0, p1, p2 and pn
+select PARTITION_NAME, PARTITION_METHOD, PARTITION_DESCRIPTION from information_schema.partitions where table_name = 't1' order by PARTITION_NAME;
+PARTITION_NAME	PARTITION_METHOD	PARTITION_DESCRIPTION
+p0	SYSTEM_TIME	NULL
+p1	SYSTEM_TIME	NULL
+p2	SYSTEM_TIME	NULL
+pn	SYSTEM_TIME	CURRENT
+## CREATE TABLE
+create or replace table t1 (x int)
+with system versioning
+partition by system_time;
+## ALTER TABLE
+alter table t1 add partition (
+partition p1 history);
+Warnings:
+Warning	4115	Maybe missing parameters: no rotation condition for multiple HISTORY partitions.
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `x` int(11) DEFAULT NULL
+) ENGINE=DEFAULT_ENGINE DEFAULT CHARSET=latin1 WITH SYSTEM VERSIONING
+ PARTITION BY SYSTEM_TIME 
+(PARTITION `p0` HISTORY ENGINE = DEFAULT_ENGINE,
+ PARTITION `p1` HISTORY ENGINE = DEFAULT_ENGINE,
+ PARTITION `pn` CURRENT ENGINE = DEFAULT_ENGINE)
+insert into t1 values (1), (2);
+alter table t1 drop partition pn;
+ERROR HY000: Wrong partitions for `t1`: must have at least one HISTORY and exactly one last CURRENT
+alter table t1 drop partition p1;
+alter table t1 drop partition p0;
+ERROR HY000: Wrong partitions for `t1`: must have at least one HISTORY and exactly one last CURRENT
+select x from t1;
+x
+1
+2
+# Bug #260: incorrect IB partitioning warning
+create or replace table t1 (x int)
+with system versioning
+partition by system_time limit 1;
+alter table t1 change x big int;
+## INSERT, UPDATE, DELETE
+create or replace table t1 (x int)
+with system versioning
+partition by system_time;
+set @now= now(6);
+insert into t1 values (1);
+set @str= concat('select x, row_start < @now as A, row_end > @now as B from t1 partition (p0)');
+prepare select_p0 from @str;
+set @str= concat('select x, row_start > @now as C, row_end = timestamp\'2038-01-19 03:14:07.999999\' as D from t1 partition (pn)');
+prepare select_pn from @str;
+execute select_p0;
+x	A	B
+execute select_pn;
+x	C	D
+1	0	1
+set @str= concat('select row_start from t1 partition (pn) into @ts0');
+prepare stmt from @str;
+Warnings:
+Warning	1287	'<select expression> INTO <destination>;' is deprecated and will be removed in a future release. Please use 'SELECT <select list> INTO <destination> FROM...' instead
+execute stmt;
+drop prepare stmt;
+set @now= now(6);
+delete from t1;
+execute select_p0;
+x	A	B
+1	0	0
+execute select_pn;
+x	C	D
+set @str= concat('select row_start from t1 partition (p0) into @ts1');
+prepare stmt from @str;
+Warnings:
+Warning	1287	'<select expression> INTO <destination>;' is deprecated and will be removed in a future release. Please use 'SELECT <select list> INTO <destination> FROM...' instead
+execute stmt;
+drop prepare stmt;
+select @ts0 = @ts1;
+@ts0 = @ts1
+1
+set @now= now(6);
+insert into t1 values (2);
+execute select_p0;
+x	A	B
+1	0	0
+execute select_pn;
+x	C	D
+2	0	1
+set @str= concat('select row_start from t1 partition (pn) into @ts0');
+prepare stmt from @str;
+Warnings:
+Warning	1287	'<select expression> INTO <destination>;' is deprecated and will be removed in a future release. Please use 'SELECT <select list> INTO <destination> FROM...' instead
+execute stmt;
+drop prepare stmt;
+set @now= now(6);
+update t1 set x = x + 1;
+execute select_p0;
+x	A	B
+1	0	0
+execute select_pn;
+x	C	D
+3	0	1
+drop prepare select_p0;
+drop prepare select_pn;
+set @str= concat('select row_start from t1 partition (p0) where x = 2 into @ts1');
+prepare stmt from @str;
+Warnings:
+Warning	1287	'<select expression> INTO <destination>;' is deprecated and will be removed in a future release. Please use 'SELECT <select list> INTO <destination> FROM...' instead
+execute stmt;
+Warnings:
+Warning	1329	No data - zero rows fetched, selected, or processed
+drop prepare stmt;
+set @str= concat('select row_end from t1 partition (p0) where x = 2 into @ts2');
+prepare stmt from @str;
+Warnings:
+Warning	1287	'<select expression> INTO <destination>;' is deprecated and will be removed in a future release. Please use 'SELECT <select list> INTO <destination> FROM...' instead
+execute stmt;
+Warnings:
+Warning	1329	No data - zero rows fetched, selected, or processed
+drop prepare stmt;
+set @str= concat('select row_start from t1 partition (pn) into @ts3');
+prepare stmt from @str;
+Warnings:
+Warning	1287	'<select expression> INTO <destination>;' is deprecated and will be removed in a future release. Please use 'SELECT <select list> INTO <destination> FROM...' instead
+execute stmt;
+drop prepare stmt;
+select @ts0 = @ts1;
+@ts0 = @ts1
+1
+select @ts2 = @ts3;
+@ts2 = @ts3
+0
+## rotation by LIMIT
+create or replace table t1 (x int)
+with system versioning
+partition by system_time limit 2 partitions 3;
+show create table t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `x` int(11) DEFAULT NULL
+) ENGINE=DEFAULT_ENGINE DEFAULT CHARSET=latin1 WITH SYSTEM VERSIONING
+ PARTITION BY SYSTEM_TIME LIMIT 2
+PARTITIONS 3
+insert into t1 values (1), (2), (3), (4), (5), (6);
+select * from t1 partition (pn);
+x
+1
+2
+3
+4
+5
+6
+delete from t1 where x < 4;
+delete from t1;
+select * from t1 partition (p0);
+x
+1
+2
+3
+select * from t1 partition (p1);
+x
+4
+5
+6
+insert into t1 values (7), (8);
+Warnings:
+Warning	4114	Versioned table `test`.`t1`: last HISTORY partition (`p1`) is out of LIMIT, need more HISTORY partitions
+### warn about full partition
+delete from t1;
+Warnings:
+Warning	4114	Versioned table `test`.`t1`: last HISTORY partition (`p1`) is out of LIMIT, need more HISTORY partitions
+select * from t1 partition (p1) order by x;
+x
+4
+5
+6
+7
+8
+### Assertion in ALTER on warning from partitioning LIMIT [#446]
+create or replace table t1 (x int) with system versioning;
+insert into t1 values (1), (2);
+delete from t1;
+alter table t1 partition by system_time limit 1;
+## Subpartitions
+# SUBPARTITION BY SYSTEM_TIME is not supported
+create or replace table n1 (x int)
+partition by range(x)
+subpartition by system_time subpartitions 2
+(partition part1 values less than (1000));
+ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near 'system_time subpartitions 2
+(partition part1 values less than (1000))' at line 3
+create or replace table t1 (x int)
+with system versioning
+partition by system_time limit 2 partitions 3
+subpartition by key (x)
+subpartitions 2;
+insert into t1 (x) values (1), (2), (3), (4), (5);
+select * from t1 partition (pnsp0);
+x
+1
+3
+5
+select * from t1 partition (pnsp1);
+x
+2
+4
+### warn about full partition
+delete from t1 where x < 3;
+delete from t1;
+delete from t1;
+select * from t1 partition (p0sp0);
+x
+1
+3
+5
+select * from t1 partition (p0sp1);
+x
+2
+4
+select * from t1 partition (p1sp0);
+x
+select * from t1 partition (p1sp1);
+x
+create or replace table t1 (i int) with system versioning
+partition by system_time interval 1 hour;
+set @ts=(select partition_description from information_schema.partitions
+where table_schema='test' and table_name='t1' and partition_name='p0');
+alter table t1 add column b int;
+select partition_name,partition_ordinal_position,partition_method,timediff(partition_description, @ts) from information_schema.partitions where table_schema='test' and table_name='t1';
+partition_name	partition_ordinal_position	partition_method	timediff(partition_description, @ts)
+p0	1	SYSTEM_TIME	00:00:00.000000
+pn	2	SYSTEM_TIME	NULL
+Warnings:
+Warning	1292	Incorrect time value: 'CURRENT'
+alter table t1 add partition (partition p1 history, partition p2 history);
+select partition_name,partition_ordinal_position,partition_method,timediff(partition_description, @ts) from information_schema.partitions where table_schema='test' and table_name='t1';
+partition_name	partition_ordinal_position	partition_method	timediff(partition_description, @ts)
+p0	1	SYSTEM_TIME	00:00:00.000000
+p1	2	SYSTEM_TIME	01:00:00.000000
+p2	3	SYSTEM_TIME	02:00:00.000000
+pn	4	SYSTEM_TIME	NULL
+Warnings:
+Warning	1292	Incorrect time value: 'CURRENT'
+alter table t1 drop partition p0;
+select partition_name,partition_ordinal_position,partition_method,timediff(partition_description, @ts) from information_schema.partitions where table_schema='test' and table_name='t1';
+partition_name	partition_ordinal_position	partition_method	timediff(partition_description, @ts)
+p1	1	SYSTEM_TIME	01:00:00.000000
+p2	2	SYSTEM_TIME	02:00:00.000000
+pn	3	SYSTEM_TIME	NULL
+Warnings:
+Warning	1292	Incorrect time value: 'CURRENT'
+alter table t1 drop partition p2;
+ERROR HY000: Can only drop oldest partitions when rotating by INTERVAL
+select partition_name,partition_ordinal_position,partition_method,timediff(partition_description, @ts) from information_schema.partitions where table_schema='test' and table_name='t1';
+partition_name	partition_ordinal_position	partition_method	timediff(partition_description, @ts)
+p1	1	SYSTEM_TIME	01:00:00.000000
+p2	2	SYSTEM_TIME	02:00:00.000000
+pn	3	SYSTEM_TIME	NULL
+Warnings:
+Warning	1292	Incorrect time value: 'CURRENT'
+#
+# MDEV-18957 UPDATE with LIMIT clause is wrong for versioned partitioned tables
+#
+create or replace table t1 (
+x int,
+a varchar(255)
+) with system versioning partition by system_time;
+insert into t1 (x) values (1), (2), (3), (4);
+update t1 set a= 'foo' limit 3;
+update t1 set a= 'bar' limit 4;
+select * from t1;
+x	a
+1	bar
+2	bar
+3	bar
+4	bar
 # Test cleanup
 drop database test;
 create database test;

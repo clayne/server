@@ -144,7 +144,7 @@ set timestamp= unix_timestamp('2001-01-01 00:00:00');
 --echo # it's ok to add partitions for past:
 create or replace table t1 (i int) with system versioning
 partition by system_time interval 1 day starts '2000-01-01 00:00:00'
-(partition p0 history, partition p1 history, partition pn current);
+partitions 3;
 
 --echo # we are warned when we push to present:
 insert into t1 values (0);
